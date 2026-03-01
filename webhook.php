@@ -4,37 +4,42 @@ require_once 'bot.php';
 
 $bot = new TelegramEventBot();
 
-// Получаем входящие данные от Telegram
 $input = file_get_contents('php://input');
 $update = json_decode($input, true);
 
-// ЛОГИРОВАНИЕ: Записываем сырые данные для отладки (опционально)
 if (DEBUG_MODE && !empty($input)) {
     $bot->writeLog("Raw webhook input received (length: " . strlen($input) . " chars)", 'DEBUG');
 }
 
-// ЛОГИРОВАНИЕ: Записываем входящее сообщение
 if (!empty($update)) {
     $bot->logIncomingMessage($update);
+    registerKnownChatAndTopic($update);
+    appendChatAccessLog($update);
 }
 
-// Обработка загруженных файлов (для всех пользователей)
+if (!empty($update) && isset($update['callback_query'])) {
+    handleComposeCallback($bot, $update['callback_query']);
+    http_response_code(200);
+    echo 'OK';
+    exit;
+}
+
 if (!empty($update) && isset($update['message'])) {
     $message = $update['message'];
-    
-    // Проверяем, содержит ли сообщение файл
-    $hasFile = isset($message['photo']) || isset($message['document']) || 
-               isset($message['video']) || isset($message['audio']) || 
-               isset($message['voice']) || isset($message['sticker']);
-    
+    $chatId = $message['chat']['id'];
+    $text = trim($message['text'] ?? '');
+    $userId = $message['from']['id'];
+    $chatType = $message['chat']['type'] ?? 'private';
+
+    $hasFile = isset($message['photo']) || isset($message['document']) || isset($message['video']) || isset($message['audio']) || isset($message['voice']) || isset($message['sticker']);
     if ($hasFile) {
-        // Сохраняем файл
         $fileInfo = $bot->handleUploadedFile($update);
         if ($fileInfo) {
             $state = loadComposeState();
             $composeUserId = $fileInfo['user_id'];
             if (isset($state[$composeUserId])) {
-                $state[$composeUserId]['file_path'] = $fileInfo['path'];
+                $state[$composeUserId]['file_id'] = $fileInfo['file_id'];
+                $state[$composeUserId]['file_name'] = $fileInfo['file_name'] ?? '';
                 $state[$composeUserId]['file_type'] = $fileInfo['type'];
                 if (!empty($fileInfo['caption'])) {
                     $state[$composeUserId]['caption'] = $fileInfo['caption'];
@@ -48,727 +53,195 @@ if (!empty($update) && isset($update['message'])) {
                     'Markdown',
                     null,
                     null,
-                    buildComposeKeyboard()
+                    buildComposeKeyboard($state[$composeUserId])
                 );
             }
-            // Файл успешно сохранен, дальше обрабатываем как обычно
         }
     }
-}
 
-// Простая обработка команд от администраторов
-if (!empty($update) && isset($update['message'])) {
-    $message = $update['message'];
-    $chatId = $message['chat']['id'];
-    $text = $message['text'] ?? '';
-    $userId = $message['from']['id'];
-    $chatType = $message['chat']['type'] ?? 'private'; // private, group, supergroup, channel
-    
-    // Логируем информацию о сообщении
-    $bot->writeLog("Message from user $userId in $chatType chat $chatId: " . substr($text, 0, 100), 'DEBUG');
-    
-    // Проверяем, что команда от администратора
-    if (in_array($userId, ADMIN_IDS)) {
-        // Обрезаем лишние пробелы
-        $text = trim($text);
-        
-        // ОПРЕДЕЛЯЕМ КОМАНДЫ (включая команды для локальных файлов)
-        $knownCommands = [
-            '/start',
-            '/check',
-            '/stats',
-            '/test',
-            '/help',
-            '/logs',
-            '/logs_incoming',
-            '/cleanup_logs',
-            '/chats',
-            '/files',
-            '/send_local_photo',
-            '/send_local_video',
-            '/send_local_document',
-            '/send_local_audio',
-            '/send_local_voice',
-            '/send_local_sticker',
-            '/delete_file',
-            '/cleanup_files',
-            '/send_text',
-            '/compose',
-            '/cancel_compose'
-        ];
-        
-        // Проверяем, является ли сообщение командой
-        $isCommand = false;
-        $command = '';
-        
-        foreach ($knownCommands as $cmd) {
-            if (strpos($text, $cmd) === 0) {
-                $isCommand = true;
-                $command = $cmd;
-                break;
-            }
+    if (!in_array($userId, ADMIN_IDS)) {
+        if (strpos($text, '/') === 0 && $chatType === 'private') {
+            $bot->sendMessage($chatId, "⛔ У вас нет доступа к командам бота. Обратитесь к администратору.");
         }
-        
-        // Если это не известная команда - ИГНОРИРУЕМ
-        if (!$isCommand) {
-            $state = loadComposeState();
-            $userCompose = $state[$userId] ?? null;
+        http_response_code(200);
+        echo 'OK';
+        exit;
+    }
 
-            if ($userCompose && $chatType === 'private') {
-                $normalized = trim($text);
-                if ($normalized === '📝 Текст') {
-                    $state[$userId]['waiting_for'] = 'text';
-                    saveComposeState($state);
-                    $bot->sendMessage($chatId, "✍️ Отправьте текст следующим сообщением.", 'Markdown', null, null, buildComposeKeyboard());
-                    http_response_code(200);
-                    echo 'OK';
-                    exit;
-                }
-
-                if ($normalized === '🏷 Подпись') {
-                    $state[$userId]['waiting_for'] = 'caption';
-                    saveComposeState($state);
-                    $bot->sendMessage($chatId, "🏷 Отправьте подпись к файлу следующим сообщением.", 'Markdown', null, null, buildComposeKeyboard());
-                    http_response_code(200);
-                    echo 'OK';
-                    exit;
-                }
-
-                if ($normalized === '📎 Файл') {
-                    $state[$userId]['waiting_for'] = 'file';
-                    saveComposeState($state);
-                    $bot->sendMessage($chatId, "📎 Отправьте файл следующим сообщением.", 'Markdown', null, null, buildComposeKeyboard());
-                    http_response_code(200);
-                    echo 'OK';
-                    exit;
-                }
-
-                if ($normalized === '🧹 Очистить файл') {
-                    $state[$userId]['file_path'] = '';
-                    $state[$userId]['file_type'] = '';
-                    $state[$userId]['caption'] = '';
-                    $state[$userId]['waiting_for'] = null;
-                    saveComposeState($state);
-                    $bot->sendMessage($chatId, "🧹 Файл удален из черновика.
-
-" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard());
-                    http_response_code(200);
-                    echo 'OK';
-                    exit;
-                }
-
-                if ($normalized === '❌ Отмена') {
-                    unset($state[$userId]);
-                    saveComposeState($state);
-                    $bot->sendMessage($chatId, "❌ Режим отправки отменен.");
-                    http_response_code(200);
-                    echo 'OK';
-                    exit;
-                }
-
-                if ($normalized === '🚀 Отправить') {
-                    $sendResult = sendComposeDraft($bot, $state[$userId]);
-                    if ($sendResult['ok']) {
-                        $bot->sendMessage($chatId, "✅ Черновик отправлен.");
-                        unset($state[$userId]);
-                    } else {
-                        $bot->sendMessage($chatId, "❌ " . $sendResult['error'] . "
-
-" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard());
-                    }
-                    saveComposeState($state);
-                    http_response_code(200);
-                    echo 'OK';
-                    exit;
-                }
-
-                if (($state[$userId]['waiting_for'] ?? null) === 'text' && $normalized !== '') {
-                    $state[$userId]['text'] = $text;
-                    $state[$userId]['waiting_for'] = null;
-                    saveComposeState($state);
-                    $bot->sendMessage($chatId, "✅ Текст сохранен.
-
-" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard());
-                    http_response_code(200);
-                    echo 'OK';
-                    exit;
-                }
-
-                if (($state[$userId]['waiting_for'] ?? null) === 'caption' && $normalized !== '') {
-                    $state[$userId]['caption'] = $text;
-                    $state[$userId]['waiting_for'] = null;
-                    saveComposeState($state);
-                    $bot->sendMessage($chatId, "✅ Подпись сохранена.
-
-" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard());
-                    http_response_code(200);
-                    echo 'OK';
-                    exit;
-                }
-            }
-
-            // Если это похоже на команду (начинается с /), логируем но не отвечаем
-            if (strpos($text, '/') === 0) {
-                $bot->writeLog("Unknown command from admin $userId: $text", 'INFO');
-                // НЕ ОТВЕЧАЕМ - просто игнорируем
-            } else {
-                // Обычное сообщение (не команда) - просто логируем
-                $bot->writeLog("Regular message from admin $userId (not a command)", 'DEBUG');
-            }
-            http_response_code(200);
-            echo 'OK';
-            exit;
+    $knownCommands = ['/start', '/help', '/compose', '/cancel_compose'];
+    $command = '';
+    foreach ($knownCommands as $cmd) {
+        if (strpos($text, $cmd) === 0) {
+            $command = $cmd;
+            break;
         }
-        
-        // ОБРАБОТКА ИЗВЕСТНЫХ КОМАНД
-        $bot->writeLog("Processing admin command from $userId: $command", 'INFO');
-        
-        switch ($command) {
-            case '/start':
-                $response = "🤖 *Бот для создания тем из событий WordPress*\n\n";
-                $response .= "📱 *Доступные команды:*\n\n";
-                $response .= "*Основные:*\n";
-                $response .= "/check - Проверить новые события\n";
-                $response .= "/stats - Статистика бота\n";
-                $response .= "/test - Тест подключений\n";
-                $response .= "/chats - Список чатов\n\n";
-                $response .= "*Отправка сообщений:*\n";
-                $response .= "/send_text*-*<chat_id>*-*<текст>*-*[topic_id] - Отправить текст\n";
-                $response .= "/send_local_photo <chat_id> <имя_файла> [caption] [topic_id] - Отправить фото\n";
-                $response .= "/send_local_video <chat_id> <имя_файла> [caption] [topic_id] - Отправить видео\n";
-                $response .= "/send_local_document <chat_id> <имя_файла> [caption] [topic_id] - Отправить документ\n";
-                $response .= "/delete_file <имя_файла> - Удалить файл\n";
-                $response .= "/cleanup_files - Очистить старые файлы\n\n";
-                $response .= "*Логи:*\n";
-                $response .= "/logs - Показать последние логи\n";
-                $response .= "/logs_incoming - Показать входящие сообщения\n";
-                $response .= "/cleanup_logs - Очистить старые логи\n\n";
-                $response .= "/compose <chat_id> [topic_id] - Открыть интерфейс отправки в Telegram\n";
-                $response .= "/help - Подробная справка";
+    }
 
-                $bot->sendMessage($chatId, $response, 'Markdown');
-                $bot->writeLog("Sent /start response to admin $userId", 'INFO');
-                break;
-                
-            case '/compose':
-                $bot->writeLog("Admin $userId opened compose mode", 'INFO');
-                $parts = preg_split('/\s+/', $text);
-                if (count($parts) < 2) {
-                    $response = "❌ Укажите chat_id.\n";
-                    $response .= "Использование: `/compose <chat_id> [topic_id]`";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
+    if ($command === '') {
+        $state = loadComposeState();
+        $draft = $state[$userId] ?? null;
 
-                $targetChatId = $parts[1];
-                $topicId = isset($parts[2]) && is_numeric($parts[2]) ? (int)$parts[2] : null;
+        if ($draft && $chatType === 'private') {
+            if ($text === '💬 Чат') {
+                $bot->sendMessage($chatId, "Выберите чат для отправки:", 'Markdown', null, null, buildChatSelectionKeyboard($userId));
+                http_response_code(200);
+                echo 'OK';
+                exit;
+            }
 
-                $state = loadComposeState();
-                $state[$userId] = [
-                    'chat_id' => $targetChatId,
-                    'topic_id' => $topicId,
-                    'text' => '',
-                    'caption' => '',
-                    'file_path' => '',
-                    'file_type' => '',
-                    'waiting_for' => null
-                ];
+            if ($text === '🧵 Топик') {
+                $bot->sendMessage($chatId, "Выберите топик для текущего чата:", 'Markdown', null, null, buildTopicSelectionKeyboard($userId, $draft['chat_id'] ?? null));
+                http_response_code(200);
+                echo 'OK';
+                exit;
+            }
+
+            if ($text === '📝 Текст') {
+                $state[$userId]['waiting_for'] = 'text';
                 saveComposeState($state);
+                $bot->sendMessage($chatId, "✍️ Отправьте текст следующим сообщением.", 'Markdown', null, null, buildComposeKeyboard($state[$userId]));
+                http_response_code(200);
+                echo 'OK';
+                exit;
+            }
 
-                $bot->sendMessage($chatId, buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard());
-                break;
+            if ($text === '🏷 Подпись') {
+                $state[$userId]['waiting_for'] = 'caption';
+                saveComposeState($state);
+                $bot->sendMessage($chatId, "🏷 Отправьте подпись следующим сообщением.", 'Markdown', null, null, buildComposeKeyboard($state[$userId]));
+                http_response_code(200);
+                echo 'OK';
+                exit;
+            }
 
-            case '/cancel_compose':
-                $state = loadComposeState();
+            if ($text === '📎 Файл') {
+                $state[$userId]['waiting_for'] = 'file';
+                saveComposeState($state);
+                $bot->sendMessage($chatId, "📎 Отправьте файл следующим сообщением.", 'Markdown', null, null, buildComposeKeyboard($state[$userId]));
+                http_response_code(200);
+                echo 'OK';
+                exit;
+            }
+
+            if ($text === '🧹 Очистить файл') {
+                $state[$userId]['file_id'] = '';
+                $state[$userId]['file_name'] = '';
+                $state[$userId]['file_type'] = '';
+                $state[$userId]['caption'] = '';
+                $state[$userId]['waiting_for'] = null;
+                saveComposeState($state);
+                $bot->sendMessage($chatId, "🧹 Файл удален из черновика.\n\n" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard($state[$userId]));
+                http_response_code(200);
+                echo 'OK';
+                exit;
+            }
+
+            if ($text === '❌ Отмена') {
                 unset($state[$userId]);
                 saveComposeState($state);
                 $bot->sendMessage($chatId, "❌ Режим отправки отменен.");
-                break;
-
-            case '/send_text':
-                $bot->writeLog("Admin $userId sending text message", 'INFO');
-                $parts = explode('*-*', $text, 4);
-                if (count($parts) < 3) {
-                    $response = "❌ *Неверный формат команды.*\n\n";
-                    $response .= "*Использование:*\n";
-                    $response .= "`/send_text*-*<chat_id>*-*<текст>*-*[topic_id]`\n\n";
-                    $response .= "*Примеры:*\n";
-                    $response .= "`/send_text*-*-100123456789*-*Привет, мир!`\n";
-                    $response .= "`/send_text*-*-100123456789*-*Сообщение в топик*-*123`\n";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $targetChatId = $parts[1];
-                $messageText = $parts[2];
-                $topicId = count($parts) >= 4 ? $parts[3] : null;
-                
-                $result = $bot->sendMessage($targetChatId, $messageText, 'Markdown', null, $topicId);
-                if ($result && isset($result['ok']) && $result['ok']) {
-                    $response = "✅ Текст успешно отправлен в чат `$targetChatId`";
-                    if ($topicId) {
-                        $response .= " в топик `$topicId`";
-                    }
-                } else {
-                    $error = isset($result['description']) ? $result['description'] : 'Неизвестная ошибка';
-                    $response = "❌ Ошибка отправки текста: `$error`";
-                }
-                $bot->sendMessage($chatId, $response, 'Markdown');
-                break;
-                
-            case '/files':
-                $bot->writeLog("Admin $userId requested file list", 'INFO');
-                $files = $bot->getLocalFiles();
-                
-                if (empty($files)) {
-                    $response = "📁 <b>Сохраненные файлы:</b>\n\nНет сохраненных файлов.\n\nОтправьте файл боту, чтобы он сохранился автоматически.";
-                } else {
-                    $response = "📁 <b>Сохраненные файлы:</b>\n\n";
-                    
-                    // Группируем файлы по типам
-                    $filesByType = [];
-                    foreach ($files as $file) {
-                        $type = $file['type'];
-                        if (!isset($filesByType[$type])) {
-                            $filesByType[$type] = [];
-                        }
-                        $filesByType[$type][] = $file;
-                    }
-                        
-                    foreach ($filesByType as $type => $typeFiles) {
-                        $typeName = getTypeName($type);
-                        $response .= "<b>{$typeName}:</b>\n";
-                        foreach ($typeFiles as $file) {
-                            // Экранируем HTML-сущности
-                            $fileName = htmlspecialchars($file['name'], ENT_QUOTES | ENT_HTML5, 'UTF-8');
-                            $size = htmlspecialchars($file['size_formatted'], ENT_QUOTES | ENT_HTML5, 'UTF-8');
-                            $response .= "  • <code>{$fileName}</code> ({$size})\n";
-                        }
-                        $response .= "\n";
-                    }
-                    
-                    $response .= "Используйте команды /send_local_* для отправки файлов.";
-                }
-                
-                $bot->sendMessage($chatId, $response, 'HTML');
-                break;
-            
-            case '/send_local_photo':
-                $bot->writeLog("Admin $userId sending local photo", 'INFO');
-                $parts = explode(' ', $text, 5);
-                if (count($parts) < 3) {
-                    $response = "❌ *Неверный формат команды.*\n\n";
-                    $response .= "*Использование:*\n";
-                    $response .= "`/send_local_photo <chat_id> <имя_файла> [caption] [topic_id]`\n\n";
-                    $response .= "*Примеры:*\n";
-                    $response .= "`/send_local_photo -100123456789 photo.jpg \"Мое фото\"`\n";
-                    $response .= "`/send_local_photo -100123456789 photo.jpg \"Фото в топик\" 123`\n\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $targetChatId = $parts[1];
-                $fileName = $parts[2];
-                $caption = '';
-                $topicId = null;
-                
-                if (count($parts) >= 4) {
-                    // Проверяем, является ли 4-й параметр числом (topic_id) или строкой (caption)
-                    if (is_numeric($parts[3]) && count($parts) == 4) {
-                        $topicId = $parts[3];
-                    } else {
-                        $caption = $parts[3];
-                        if (count($parts) >= 5) {
-                            $topicId = $parts[4];
-                        }
-                    }
-                }
-                
-                $filePath = $bot->uploadsDir . '/' . $fileName;
-                
-                if (!file_exists($filePath)) {
-                    $response = "❌ Файл `$fileName` не найден.\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $result = $bot->sendPhotoFromFile($targetChatId, $filePath, $caption, 'Markdown', null, $topicId);
-                if ($result && isset($result['ok']) && $result['ok']) {
-                    $response = "✅ Фото `$fileName` успешно отправлено в чат `$targetChatId`";
-                    if ($topicId) {
-                        $response .= " в топик `$topicId`";
-                    }
-                } else {
-                    $error = isset($result['description']) ? $result['description'] : 'Неизвестная ошибка';
-                    $response = "❌ Ошибка отправки фото: `$error`";
-                }
-                $bot->sendMessage($chatId, $response, 'Markdown');
-                break;
-                
-            case '/send_local_video':
-                $bot->writeLog("Admin $userId sending local video", 'INFO');
-                $parts = explode(' ', $text, 5);
-                if (count($parts) < 3) {
-                    $response = "❌ *Неверный формат команды.*\n\n";
-                    $response .= "*Использование:*\n";
-                    $response .= "`/send_local_video <chat_id> <имя_файла> [caption] [topic_id]`\n\n";
-                    $response .= "*Примеры:*\n";
-                    $response .= "`/send_local_video -100123456789 video.mp4 \"Мое видео\"`\n";
-                    $response .= "`/send_local_video -100123456789 video.mp4 \"Видео в топик\" 123`\n\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $targetChatId = $parts[1];
-                $fileName = $parts[2];
-                $caption = '';
-                $topicId = null;
-                
-                if (count($parts) >= 4) {
-                    // Проверяем, является ли 4-й параметр числом (topic_id) или строкой (caption)
-                    if (is_numeric($parts[3]) && count($parts) == 4) {
-                        $topicId = $parts[3];
-                    } else {
-                        $caption = $parts[3];
-                        if (count($parts) >= 5) {
-                            $topicId = $parts[4];
-                        }
-                    }
-                }
-                
-                $filePath = $bot->uploadsDir . '/' . $fileName;
-                
-                if (!file_exists($filePath)) {
-                    $response = "❌ Файл `$fileName` не найден.\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $result = $bot->sendVideoFromFile($targetChatId, $filePath, $caption, 'Markdown', null, $topicId);
-                if ($result && isset($result['ok']) && $result['ok']) {
-                    $response = "✅ Видео `$fileName` успешно отправлено в чат `$targetChatId`";
-                    if ($topicId) {
-                        $response .= " в топик `$topicId`";
-                    }
-                } else {
-                    $error = isset($result['description']) ? $result['description'] : 'Неизвестная ошибка';
-                    $response = "❌ Ошибка отправки видео: `$error`";
-                }
-                $bot->sendMessage($chatId, $response, 'Markdown');
-                break;
-                
-            case '/send_local_document':
-                $bot->writeLog("Admin $userId sending local document", 'INFO');
-                $parts = explode(' ', $text, 5);
-                if (count($parts) < 3) {
-                    $response = "❌ *Неверный формат команды.*\n\n";
-                    $response .= "*Использование:*\n";
-                    $response .= "`/send_local_document <chat_id> <имя_файла> [caption] [topic_id]`\n\n";
-                    $response .= "*Примеры:*\n";
-                    $response .= "`/send_local_document -100123456789 document.pdf \"Документ\"`\n";
-                    $response .= "`/send_local_document -100123456789 document.pdf \"Документ в топик\" 123`\n\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $targetChatId = $parts[1];
-                $fileName = $parts[2];
-                $caption = '';
-                $topicId = null;
-                
-                if (count($parts) >= 4) {
-                    // Проверяем, является ли 4-й параметр числом (topic_id) или строкой (caption)
-                    if (is_numeric($parts[3]) && count($parts) == 4) {
-                        $topicId = $parts[3];
-                    } else {
-                        $caption = $parts[3];
-                        if (count($parts) >= 5) {
-                            $topicId = $parts[4];
-                        }
-                    }
-                }
-                
-                $filePath = $bot->uploadsDir . '/' . $fileName;
-                
-                if (!file_exists($filePath)) {
-                    $response = "❌ Файл `$fileName` не найден.\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $result = $bot->sendDocumentFromFile($targetChatId, $filePath, $caption, 'Markdown', null, $topicId);
-                if ($result && isset($result['ok']) && $result['ok']) {
-                    $response = "✅ Документ `$fileName` успешно отправлен в чат `$targetChatId`";
-                    if ($topicId) {
-                        $response .= " в топик `$topicId`";
-                    }
-                } else {
-                    $error = isset($result['description']) ? $result['description'] : 'Неизвестная ошибка';
-                    $response = "❌ Ошибка отправки документа: `$error`";
-                }
-                $bot->sendMessage($chatId, $response, 'Markdown');
-                break;
-                
-            case '/send_local_audio':
-                $bot->writeLog("Admin $userId sending local audio", 'INFO');
-                $parts = explode(' ', $text, 5);
-                if (count($parts) < 3) {
-                    $response = "❌ *Неверный формат команды.*\n\n";
-                    $response .= "*Использование:*\n";
-                    $response .= "`/send_local_audio <chat_id> <имя_файла> [caption] [topic_id]`\n\n";
-                    $response .= "*Примеры:*\n";
-                    $response .= "`/send_local_audio -100123456789 audio.mp3 \"Музыка\"`\n";
-                    $response .= "`/send_local_audio -100123456789 audio.mp3 \"Аудио в топик\" 123`\n\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $targetChatId = $parts[1];
-                $fileName = $parts[2];
-                $caption = '';
-                $topicId = null;
-                
-                if (count($parts) >= 4) {
-                    // Проверяем, является ли 4-й параметр числом (topic_id) или строкой (caption)
-                    if (is_numeric($parts[3]) && count($parts) == 4) {
-                        $topicId = $parts[3];
-                    } else {
-                        $caption = $parts[3];
-                        if (count($parts) >= 5) {
-                            $topicId = $parts[4];
-                        }
-                    }
-                }
-                
-                $filePath = $bot->uploadsDir . '/' . $fileName;
-                
-                if (!file_exists($filePath)) {
-                    $response = "❌ Файл `$fileName` не найден.\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $result = $bot->sendAudioFromFile($targetChatId, $filePath, $caption, 'Markdown', null, $topicId);
-                if ($result && isset($result['ok']) && $result['ok']) {
-                    $response = "✅ Аудио `$fileName` успешно отправлено в чат `$targetChatId`";
-                    if ($topicId) {
-                        $response .= " в топик `$topicId`";
-                    }
-                } else {
-                    $error = isset($result['description']) ? $result['description'] : 'Неизвестная ошибка';
-                    $response = "❌ Ошибка отправки аудио: `$error`";
-                }
-                $bot->sendMessage($chatId, $response, 'Markdown');
-                break;
-                
-            case '/delete_file':
-                $bot->writeLog("Admin $userId deleting file", 'INFO');
-                $parts = explode(' ', $text, 2);
-                if (count($parts) < 2) {
-                    $response = "❌ *Неверный формат команды.*\n\n";
-                    $response .= "*Использование:*\n";
-                    $response .= "`/delete_file <имя_файла>`\n\n";
-                    $response .= "*Пример:*\n";
-                    $response .= "`/delete_file photo.jpg`\n\n";
-                    $response .= "Используйте `/files` для просмотра доступных файлов.";
-                    $bot->sendMessage($chatId, $response, 'Markdown');
-                    break;
-                }
-                
-                $fileName = $parts[1];
-                
-                $success = $bot->deleteLocalFile($fileName);
-                if ($success) {
-                    $response = "✅ Файл `$fileName` успешно удален.";
-                } else {
-                    $response = "❌ Не удалось удалить файл `$fileName`.";
-                }
-                $bot->sendMessage($chatId, $response, 'Markdown');
-                break;
-                
-            case '/cleanup_files':
-                $bot->writeLog("Admin $userId cleaning up files", 'INFO');
-                $parts = explode(' ', $text, 2);
-                $days = isset($parts[1]) ? intval($parts[1]) : 7;
-                
-                $deleted = $bot->cleanupOldFiles($days);
-                $response = "🧹 Удалено старых файлов: $deleted (старше $days дней)";
-                $bot->sendMessage($chatId, $response);
-                break;
-                
-            // Остальные существующие команды...
-            case '/check':
-                $bot->writeLog("Admin $userId triggered manual check", 'INFO');
-                $result = $bot->checkForNewEvents();
-                $response = "✅ Проверка завершена.\n";
-                $response .= "Найдено событий: {$result['total']}\n";
-                $response .= "Обработано новых: {$result['processed']}\n";
-                $response .= "Уже было обработано: {$result['already_processed']}";
-                $bot->sendMessage($chatId, $response);
-                $bot->writeLog("Manual check completed: {$result['processed']} new events processed", 'INFO');
-                break;
-                
-            case '/stats':
-                $bot->writeLog("Admin $userId requested stats", 'INFO');
-                $stats = $bot->getStats();
-                $response = "📊 *Статистика бота:*\n\n";
-                $response .= "✅ Обработано событий: {$stats['processed_events']}\n";
-                $response .= "📝 *Размеры логов:*\n";
-                foreach ($stats['log_sizes'] as $file => $size) {
-                    $response .= "  • $file: $size\n";
-                }
-                $response .= "⏰ Последняя проверка: {$stats['last_check']}\n";
-                $response .= "🔧 Статус: {$stats['bot_status']}";
-                $bot->sendMessage($chatId, $response, 'Markdown');
-                break;
-                
-            case '/test':
-                $bot->writeLog("Admin $userId triggered test", 'INFO');
-                $success = $bot->testBot();
-                $response = $success ? "✅ Все тесты пройдены успешно" : "❌ Тесты не пройдены";
-                $bot->sendMessage($chatId, $response);
-                break;
-                
-            case '/help':
-                $bot->writeLog("Admin $userId requested help", 'INFO');
-                $help = getHelpText();
-                $bot->sendMessage($chatId, $help, 'Markdown');
-                break;
-                
-            case '/logs':
-                $bot->writeLog("Admin $userId requested logs", 'INFO');
-                $logs = $bot->getLogs('all', 10);
-                if (empty($logs)) {
-                    $response = "📋 Логи отсутствуют или файл логов пуст.";
-                } else {
-                    $response = "📋 *Последние 10 записей лога:*\n\n";
-                    foreach ($logs as $log) {
-                        $response .= $log . "\n";
-                    }
-                }
-                $bot->sendMessage($chatId, $response, 'Markdown');
-                break;
-                
-            case '/logs_incoming':
-                $bot->writeLog("Admin $userId requested incoming logs", 'INFO');
-                $logs = $bot->getLogs('incoming', 10);
-                if (empty($logs)) {
-                    $response = "📨 Входящие логи отсутствуют.";
-                } else {
-                    $response = "📨 *Последние 10 входящих сообщений:*\n\n";
-                    foreach ($logs as $log) {
-                        $response .= $log . "\n";
-                    }
-                }
-                $bot->sendMessage($chatId, $response, 'Markdown');
-                break;
-                
-            case '/cleanup_logs':
-                $bot->writeLog("Admin $userId triggered log cleanup", 'INFO');
-                $bot->cleanupOldLogs(3);
-                $response = "🧹 Логи очищены (сохранены за последние 3 дня)";
-                $bot->sendMessage($chatId, $response);
-                break;
-                
-            case '/send_local_voice':
-                $bot->sendMessage($chatId, "❌ Команда /send_local_voice пока не реализована");
-                break;
-                
-            case '/send_local_sticker':
-                $bot->sendMessage($chatId, "❌ Команда /send_local_sticker пока не реализована");
-                break;
-
-            case '/chats':
-                $bot->writeLog("Admin $userId requested chat list", 'INFO');
-                $chats = $bot->getChats();
-                if (empty($chats)) {
-                    $response = "📱 Чаты не найдены. Бот должен получить хотя бы одно сообщение в чате.";
-                } else {
-                    $response = "📱 *Список чатов, где состоит бот:*\n\n";
-                    foreach ($chats as $chat) {
-                        $response .= "• *{$chat['title']}*\n";
-                        $response .= "  ID: `{$chat['id']}`\n";
-                        $response .= "  Тип: {$chat['type']}\n";
-                        if ($chat['username']) {
-                            $response .= "  @{$chat['username']}\n";
-                        }
-                        $response .= "\n";
-                    }
-                    $response .= "Используйте ID чата для отправки сообщений.";
-                }
-                $bot->sendMessage($chatId, $response, 'Markdown');
-                break;
-        }
-    } else {
-        // НЕ-АДМИНИСТРАТОРЫ
-        // Логируем сообщения от не-администраторов
-        $userName = $message['from']['first_name'] ?? 'Unknown';
-        $userUsername = $message['from']['username'] ?? 'No username';
-        
-        // Проверяем, является ли сообщение командой (начинается с /)
-        if (strpos(trim($text), '/') === 0) {
-            // Это команда, но от не-администратора
-            $bot->writeLog("Command from non-admin $userName (@$userUsername, ID: $userId): $text", 'WARNING');
-            
-            // ОТВЕЧАЕМ ТОЛЬКО В ЛИЧНЫХ СООБЩЕНИЯХ, В ГРУППАХ МОЛЧИМ
-            if ($chatType === 'private') {
-                $response = "⛔ У вас нет доступа к командам бота. Обратитесь к администратору.";
-                $bot->sendMessage($chatId, $response);
-            } else {
-                // В группе молчим, только логируем
-                $bot->writeLog("Ignoring command from non-admin in group chat", 'DEBUG');
+                http_response_code(200);
+                echo 'OK';
+                exit;
             }
-        } else {
-            // Обычное сообщение от не-администратора - просто логируем
-            $bot->writeLog("Regular message from non-admin $userName (@$userUsername, ID: $userId)", 'DEBUG');
-            // НЕ ОТВЕЧАЕМ
+
+            if ($text === '🚀 Отправить') {
+                $sendResult = sendComposeDraft($bot, $state[$userId]);
+                if ($sendResult['ok']) {
+                    $bot->sendMessage($chatId, "✅ Черновик отправлен.");
+                    unset($state[$userId]);
+                } else {
+                    $bot->sendMessage($chatId, "❌ " . $sendResult['error'] . "\n\n" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard($state[$userId]));
+                }
+                saveComposeState($state);
+                http_response_code(200);
+                echo 'OK';
+                exit;
+            }
+
+            if (($state[$userId]['waiting_for'] ?? null) === 'text' && $text !== '') {
+                $state[$userId]['text'] = $text;
+                $state[$userId]['waiting_for'] = null;
+                saveComposeState($state);
+                $bot->sendMessage($chatId, "✅ Текст сохранен.\n\n" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard($state[$userId]));
+                http_response_code(200);
+                echo 'OK';
+                exit;
+            }
+
+            if (($state[$userId]['waiting_for'] ?? null) === 'caption' && $text !== '') {
+                $state[$userId]['caption'] = $text;
+                $state[$userId]['waiting_for'] = null;
+                saveComposeState($state);
+                $bot->sendMessage($chatId, "✅ Подпись сохранена.\n\n" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard($state[$userId]));
+                http_response_code(200);
+                echo 'OK';
+                exit;
+            }
         }
+
+        http_response_code(200);
+        echo 'OK';
+        exit;
+    }
+
+    switch ($command) {
+        case '/start':
+        case '/help':
+            $bot->sendMessage($chatId, getHelpText(), 'Markdown');
+            break;
+
+        case '/compose':
+            $parts = preg_split('/\s+/', $text);
+            $state = loadComposeState();
+            $state[$userId] = [
+                'chat_id' => null,
+                'topic_id' => null,
+                'text' => '',
+                'caption' => '',
+                'file_id' => '',
+                'file_name' => '',
+                'file_type' => '',
+                'waiting_for' => null
+            ];
+
+            if (isset($parts[1]) && $parts[1] !== '') {
+                $state[$userId]['chat_id'] = $parts[1];
+                registerManualChatSelection($parts[1], null, null, null);
+            }
+            if (isset($parts[2]) && is_numeric($parts[2])) {
+                $state[$userId]['topic_id'] = (int)$parts[2];
+                registerManualChatSelection($state[$userId]['chat_id'], (int)$parts[2], null, null);
+            }
+
+            saveComposeState($state);
+            $bot->sendMessage($chatId, buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard($state[$userId]));
+            $bot->sendMessage($chatId, "Выберите чат для отправки:", 'Markdown', null, null, buildChatSelectionKeyboard($userId));
+            break;
+
+        case '/cancel_compose':
+            $state = loadComposeState();
+            unset($state[$userId]);
+            saveComposeState($state);
+            $bot->sendMessage($chatId, "❌ Режим отправки отменен.");
+            break;
     }
 } elseif (!empty($update)) {
-    // Логируем другие типы обновлений (не message)
     $updateType = array_keys($update)[1] ?? 'unknown';
     $bot->writeLog("Received non-message update type: $updateType", 'DEBUG');
 }
 
-// Всегда возвращаем успешный статус для Telegram
 http_response_code(200);
 echo 'OK';
-
-/**
- * Получение названия типа файла
- */
-function getTypeName($type) {
-    $names = [
-        'photo' => '📸 Фото',
-        'video' => '🎥 Видео',
-        'audio' => '🎵 Аудио',
-        'document' => '📄 Документы',
-        'voice' => '🎤 Голосовые',
-        'sticker' => '😀 Стикеры'
-    ];
-    
-    return isset($names[$type]) ? $names[$type] : ucfirst($type);
-}
-
 
 function loadComposeState() {
     if (!file_exists(COMPOSE_STATE_FILE)) {
         return [];
     }
-
     $raw = file_get_contents(COMPOSE_STATE_FILE);
     if ($raw === false || trim($raw) === '') {
         return [];
     }
-
     $decoded = json_decode($raw, true);
     return is_array($decoded) ? $decoded : [];
 }
@@ -777,9 +250,19 @@ function saveComposeState($state) {
     file_put_contents(COMPOSE_STATE_FILE, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 }
 
-function buildComposeKeyboard() {
+function buildComposeKeyboard($draft = null) {
+    $chatLabel = '💬 Чат';
+    if (is_array($draft) && !empty($draft['chat_id'])) {
+        $chatLabel .= ': ' . (string)$draft['chat_id'];
+    }
+    $topicLabel = '🧵 Топик';
+    if (is_array($draft) && !empty($draft['topic_id'])) {
+        $topicLabel .= ': ' . (string)$draft['topic_id'];
+    }
+
     return [
         'keyboard' => [
+            [['text' => $chatLabel], ['text' => $topicLabel]],
             [['text' => '📝 Текст'], ['text' => '🏷 Подпись']],
             [['text' => '📎 Файл'], ['text' => '🧹 Очистить файл']],
             [['text' => '🚀 Отправить'], ['text' => '❌ Отмена']]
@@ -794,7 +277,8 @@ function buildComposeStatusMessage($draft) {
     $topicId = $draft['topic_id'] ?? null;
     $text = trim((string)($draft['text'] ?? ''));
     $caption = trim((string)($draft['caption'] ?? ''));
-    $filePath = trim((string)($draft['file_path'] ?? ''));
+    $fileId = trim((string)($draft['file_id'] ?? ''));
+    $fileName = trim((string)($draft['file_name'] ?? ''));
 
     $msg = "✉️ *Режим отправки в Telegram*\n\n";
     $msg .= "Чат: `{$chatId}`\n";
@@ -802,7 +286,7 @@ function buildComposeStatusMessage($draft) {
         $msg .= "Топик: `{$topicId}`\n";
     }
     $msg .= "Текст: " . ($text !== '' ? '✅' : '❌') . "\n";
-    $msg .= "Файл: " . ($filePath !== '' ? '✅ `'.basename($filePath).'`' : '❌') . "\n";
+    $msg .= "Файл: " . ($fileId !== '' ? '✅ `'.($fileName !== '' ? $fileName : $fileId).'`' : '❌') . "\n";
     $msg .= "Подпись: " . ($caption !== '' ? '✅' : '❌') . "\n\n";
     $msg .= "Используйте кнопки ниже, чтобы заполнить черновик и отправить.";
 
@@ -814,14 +298,13 @@ function sendComposeDraft($bot, $draft) {
     $topicId = $draft['topic_id'] ?? null;
     $text = trim((string)($draft['text'] ?? ''));
     $caption = trim((string)($draft['caption'] ?? ''));
-    $filePath = trim((string)($draft['file_path'] ?? ''));
+    $fileId = trim((string)($draft['file_id'] ?? ''));
     $fileType = trim((string)($draft['file_type'] ?? ''));
 
     if (empty($chatId)) {
         return ['ok' => false, 'error' => 'Не указан chat_id.'];
     }
-
-    if ($text === '' && $filePath === '') {
+    if ($text === '' && $fileId === '') {
         return ['ok' => false, 'error' => 'Добавьте текст или файл перед отправкой.'];
     }
 
@@ -832,26 +315,25 @@ function sendComposeDraft($bot, $draft) {
         }
     }
 
-    if ($filePath !== '') {
-        if (!file_exists($filePath)) {
-            return ['ok' => false, 'error' => 'Файл из черновика не найден на сервере.'];
-        }
-
+    if ($fileId !== '') {
         switch ($fileType) {
             case 'photo':
-                $sentFile = $bot->sendPhotoFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                $sentFile = $bot->sendPhoto($chatId, $fileId, $caption, 'HTML', null, $topicId);
                 break;
             case 'video':
-                $sentFile = $bot->sendVideoFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                $sentFile = $bot->sendVideo($chatId, $fileId, $caption, 'HTML', null, $topicId);
                 break;
             case 'audio':
-                $sentFile = $bot->sendAudioFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                $sentFile = $bot->sendAudio($chatId, $fileId, $caption, 'HTML', null, $topicId);
                 break;
             case 'voice':
-                $sentFile = $bot->sendVoiceFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                $sentFile = $bot->sendVoice($chatId, $fileId, $caption, 'HTML', null, $topicId);
+                break;
+            case 'sticker':
+                $sentFile = $bot->sendSticker($chatId, $fileId, null, $topicId);
                 break;
             default:
-                $sentFile = $bot->sendDocumentFromFile($chatId, $filePath, $caption, 'HTML', null, $topicId);
+                $sentFile = $bot->sendDocument($chatId, $fileId, $caption, 'HTML', null, $topicId);
                 break;
         }
 
@@ -860,60 +342,231 @@ function sendComposeDraft($bot, $draft) {
         }
     }
 
+    registerManualChatSelection($chatId, $topicId, null, null);
     return ['ok' => true];
 }
 
-function formatHtmlMessage($text, $escapeHtml = true) {
-    if ($escapeHtml) {
-        $text = htmlspecialchars($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+function loadChatRegistry() {
+    if (!file_exists(CHAT_REGISTRY_FILE)) {
+        return ['chats' => []];
     }
-    return $text;
+    $raw = file_get_contents(CHAT_REGISTRY_FILE);
+    if ($raw === false || trim($raw) === '') {
+        return ['chats' => []];
+    }
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded) || !isset($decoded['chats']) || !is_array($decoded['chats'])) {
+        return ['chats' => []];
+    }
+    return $decoded;
 }
 
-/**
- * Получение текста справки
- */
+function saveChatRegistry($registry) {
+    file_put_contents(CHAT_REGISTRY_FILE, json_encode($registry, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+}
+
+function registerKnownChatAndTopic($update) {
+    $message = $update['message'] ?? null;
+    if (!is_array($message) || !isset($message['chat']['id'])) {
+        return;
+    }
+
+    $chat = $message['chat'];
+    $chatId = (string)$chat['id'];
+    $chatTitle = $chat['title'] ?? trim(($chat['first_name'] ?? '') . ' ' . ($chat['last_name'] ?? ''));
+    if ($chatTitle === '') {
+        $chatTitle = $chat['username'] ?? $chatId;
+    }
+
+    $topicId = isset($message['message_thread_id']) ? (int)$message['message_thread_id'] : null;
+    $topicName = isset($message['forum_topic_created']['name']) ? (string)$message['forum_topic_created']['name'] : null;
+
+    registerManualChatSelection($chatId, $topicId, $chatTitle, $topicName, $chat['type'] ?? 'unknown', $chat['username'] ?? null);
+}
+
+function registerManualChatSelection($chatId, $topicId = null, $chatTitle = null, $topicName = null, $chatType = 'manual', $chatUsername = null) {
+    if (empty($chatId)) {
+        return;
+    }
+
+    $registry = loadChatRegistry();
+    $chatKey = (string)$chatId;
+    if (!isset($registry['chats'][$chatKey])) {
+        $registry['chats'][$chatKey] = [
+            'chat_id' => $chatKey,
+            'title' => $chatTitle ?: $chatKey,
+            'type' => $chatType ?: 'manual',
+            'username' => $chatUsername,
+            'topics' => []
+        ];
+    } else {
+        if (!empty($chatTitle)) {
+            $registry['chats'][$chatKey]['title'] = $chatTitle;
+        }
+        if (!empty($chatType)) {
+            $registry['chats'][$chatKey]['type'] = $chatType;
+        }
+        if ($chatUsername !== null && $chatUsername !== '') {
+            $registry['chats'][$chatKey]['username'] = $chatUsername;
+        }
+    }
+
+    if (!empty($topicId)) {
+        $topicKey = (string)$topicId;
+        $existingName = $registry['chats'][$chatKey]['topics'][$topicKey]['name'] ?? null;
+        $registry['chats'][$chatKey]['topics'][$topicKey] = [
+            'topic_id' => (int)$topicId,
+            'name' => $topicName ?: ($existingName ?: ('Топик ' . (int)$topicId)),
+            'last_seen' => date('Y-m-d H:i:s')
+        ];
+    }
+
+    $registry['chats'][$chatKey]['last_seen'] = date('Y-m-d H:i:s');
+    saveChatRegistry($registry);
+}
+
+function buildChatSelectionKeyboard($userId) {
+    $registry = loadChatRegistry();
+    $rows = [];
+
+    foreach ($registry['chats'] as $chat) {
+        $chatId = (string)($chat['chat_id'] ?? '');
+        if ($chatId === '') {
+            continue;
+        }
+        $title = $chat['title'] ?? $chatId;
+        $buttonText = '💬 ' . mb_substr($title, 0, 28) . ' (' . $chatId . ')';
+        $rows[] = [['text' => $buttonText, 'callback_data' => 'compose_chat:' . $chatId]];
+    }
+
+    if (empty($rows)) {
+        $rows[] = [['text' => 'Нет сохраненных чатов', 'callback_data' => 'compose_noop']];
+    }
+
+    return ['inline_keyboard' => $rows];
+}
+
+function buildTopicSelectionKeyboard($userId, $chatId) {
+    $state = loadComposeState();
+    $selectedChatId = $chatId ?: ($state[$userId]['chat_id'] ?? null);
+    if (empty($selectedChatId)) {
+        return ['inline_keyboard' => [[['text' => 'Сначала выберите чат', 'callback_data' => 'compose_noop']]]];
+    }
+
+    $registry = loadChatRegistry();
+    $topics = $registry['chats'][(string)$selectedChatId]['topics'] ?? [];
+    $rows = [[['text' => 'Без топика', 'callback_data' => 'compose_topic:' . $selectedChatId . ':0']]];
+
+    foreach ($topics as $topic) {
+        $topicId = (int)($topic['topic_id'] ?? 0);
+        if ($topicId <= 0) {
+            continue;
+        }
+        $topicName = $topic['name'] ?? ('Топик ' . $topicId);
+        $rows[] = [[
+            'text' => '🧵 ' . mb_substr($topicName, 0, 28) . ' (' . $topicId . ')',
+            'callback_data' => 'compose_topic:' . $selectedChatId . ':' . $topicId
+        ]];
+    }
+
+    return ['inline_keyboard' => $rows];
+}
+
+function handleComposeCallback($bot, $callbackQuery) {
+    $data = $callbackQuery['data'] ?? '';
+    $fromId = $callbackQuery['from']['id'] ?? null;
+    $message = $callbackQuery['message'] ?? [];
+    $chatId = $message['chat']['id'] ?? null;
+
+    if (!$fromId || !$chatId) {
+        return;
+    }
+
+    $state = loadComposeState();
+    if (!isset($state[$fromId])) {
+        $state[$fromId] = [
+            'chat_id' => null,
+            'topic_id' => null,
+            'text' => '',
+            'caption' => '',
+            'file_id' => '',
+            'file_name' => '',
+            'file_type' => '',
+            'waiting_for' => null
+        ];
+    }
+
+    if (strpos($data, 'compose_chat:') === 0) {
+        $selectedChat = substr($data, strlen('compose_chat:'));
+        $state[$fromId]['chat_id'] = $selectedChat;
+        $state[$fromId]['topic_id'] = null;
+        registerManualChatSelection($selectedChat, null, null, null);
+        saveComposeState($state);
+        $bot->sendMessage($chatId, "✅ Чат выбран.\n\n" . buildComposeStatusMessage($state[$fromId]), 'Markdown', null, null, buildComposeKeyboard($state[$fromId]));
+        return;
+    }
+
+    if (strpos($data, 'compose_topic:') === 0) {
+        $parts = explode(':', $data);
+        $selectedChat = $parts[1] ?? null;
+        $selectedTopic = isset($parts[2]) ? (int)$parts[2] : 0;
+        if ($selectedChat) {
+            $state[$fromId]['chat_id'] = $selectedChat;
+            $state[$fromId]['topic_id'] = $selectedTopic > 0 ? $selectedTopic : null;
+            registerManualChatSelection($selectedChat, $state[$fromId]['topic_id'], null, null);
+            saveComposeState($state);
+            $bot->sendMessage($chatId, "✅ Топик обновлен.\n\n" . buildComposeStatusMessage($state[$fromId]), 'Markdown', null, null, buildComposeKeyboard($state[$fromId]));
+        }
+        return;
+    }
+}
+
+function appendChatAccessLog($update) {
+    $message = $update['message'] ?? null;
+    if (!is_array($message) || !isset($message['chat']['id'])) {
+        return;
+    }
+
+    $chatId = (string)$message['chat']['id'];
+    $chatTitle = $message['chat']['title'] ?? trim(($message['chat']['first_name'] ?? '') . ' ' . ($message['chat']['last_name'] ?? ''));
+    if ($chatTitle === '') {
+        $chatTitle = $message['chat']['username'] ?? $chatId;
+    }
+
+    $line = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'chat_id' => $chatId,
+        'chat_title' => $chatTitle,
+        'topic_id' => $message['message_thread_id'] ?? null,
+        'topic_name' => $message['forum_topic_created']['name'] ?? null,
+        'message_id' => $message['message_id'] ?? null,
+        'user_id' => $message['from']['id'] ?? null,
+        'username' => $message['from']['username'] ?? null,
+        'text' => $message['text'] ?? ($message['caption'] ?? ''),
+        'type' => detectIncomingType($message)
+    ];
+
+    $safeChatId = preg_replace('/[^0-9\-]/', '_', $chatId);
+    $path = rtrim(CHAT_LOG_DIR, '/') . '/chat_' . $safeChatId . '.log';
+    file_put_contents($path, json_encode($line, JSON_UNESCAPED_UNICODE) . PHP_EOL, FILE_APPEND);
+}
+
+function detectIncomingType($message) {
+    $types = ['text', 'photo', 'video', 'audio', 'voice', 'document', 'sticker'];
+    foreach ($types as $type) {
+        if (isset($message[$type])) {
+            return $type;
+        }
+    }
+    return 'other';
+}
+
 function getHelpText() {
-    $help = "📚 *Подробная справка по командам бота:*\n\n";
-    
-    $help .= "*📁 РАБОТА С ЛОКАЛЬНЫМИ ФАЙЛАМИ*\n";
-    $help .= "1. Отправьте файл боту (фото, видео, документ и т.д.)\n";
-    $help .= "2. Бот автоматически сохранит файл\n";
-    $help .= "3. Используйте команды для отправки сохраненных файлов\n\n";
-    
-    $help .= "*📋 КОМАНДЫ ДЛЯ ФАЙЛОВ:*\n";
-    $help .= "`/files` - Список сохраненных файлов\n";
-    $help .= "`/send_local_photo <chat_id> <файл> [подпись] [topic_id]` - Отправить фото\n";
-    $help .= "`/send_local_video <chat_id> <файл> [подпись] [topic_id]` - Отправить видео\n";
-    $help .= "`/send_local_document <chat_id> <файл> [подпись] [topic_id]` - Отправить документ\n";
-    $help .= "`/send_local_audio <chat_id> <файл> [подпись] [topic_id]` - Отправить аудио\n";
-    $help .= "`/delete_file <файл>` - Удалить файл\n";
-    $help .= "`/cleanup_files [дни]` - Очистить старые файлы\n\n";
-    
-    $help .= "*📝 ОТПРАВКА ТЕКСТА:*\n";
-    $help .= "`/send_text*-*<chat_id>*-*<текст>*-*[topic_id]` - Отправить текстовое сообщение\n";
-    $help .= "`/compose <chat_id> [topic_id]` - Открыть встроенный режим отправки в Telegram\n\n";
-    
-    $help .= "*🎯 ПРИМЕРЫ:*\n";
-    $help .= "`/files` - показать файлы\n";
-    $help .= "`/send_text*-*-100123456789*-*Привет, мир!`\n";
-    $help .= "`/send_text*-*-100123456789*-*Сообщение в топик*-*123`\n";
-    $help .= "`/compose -100123456789 123`\n";
-    $help .= "`/send_local_photo -100123456789 photo.jpg \"Мое фото\"`\n";
-    $help .= "`/send_local_photo -100123456789 photo.jpg \"Фото в топик\" 123`\n";
-    $help .= "`/delete_file old_photo.jpg`\n\n";
-    
-    $help .= "*📊 ОСНОВНЫЕ КОМАНДЫ:*\n";
-    $help .= "`/check` - Проверить новые события\n";
-    $help .= "`/stats` - Статистика бота\n";
-    $help .= "`/test` - Тест подключений\n";
-    $help .= "`/chats` - Список чатов\n\n";
-    
-    $help .= "*📝 ЛОГИ:*\n";
-    $help .= "`/logs` - Показать логи\n";
-    $help .= "`/logs_incoming` - Входящие сообщения\n";
-    $help .= "`/cleanup_logs` - Очистить логи\n";
-    
+    $help = "📚 *Команды бота*\n\n";
+    $help .= "`/compose` — открыть режим подготовки сообщения\n";
+    $help .= "`/cancel_compose` — отменить текущий черновик\n\n";
+    $help .= "В compose выбирайте чат/топик кнопками, затем добавляйте текст, файл и подпись.\n";
+    $help .= "Логи сообщений доступны на сервере: `message_logs.php`.";
     return $help;
 }
 ?>

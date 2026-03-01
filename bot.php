@@ -83,84 +83,85 @@ class TelegramEventBot {
 }
     
     /**
-     * Загрузка файла от пользователя (из сообщения)
+     * Обработка загруженного файла от пользователя (без скачивания на сервер)
      */
     public function handleUploadedFile($update) {
         if (!isset($update['message'])) {
             return false;
         }
-        
+
         $message = $update['message'];
         $chatId = $message['chat']['id'];
         $userId = $message['from']['id'];
         $userName = $message['from']['first_name'] ?? 'Unknown';
-        
-        // Проверяем тип сообщения
+
+        $fileId = null;
+        $fileType = null;
+        $fileName = '';
+        $caption = $message['caption'] ?? '';
+
         if (isset($message['photo'])) {
-            // Фото - берем последнее (самое большое качество)
-            $photos = $message['photo'];
-            $photo = end($photos);
-            $fileId = $photo['file_id'];
+            $photo = end($message['photo']);
+            $fileId = $photo['file_id'] ?? null;
             $fileType = 'photo';
-            $caption = $message['caption'] ?? '';
+            $fileName = 'photo';
         } elseif (isset($message['document'])) {
-            // Документ
             $document = $message['document'];
-            $fileId = $document['file_id'];
-            $fileName = $document['file_name'] ?? 'document';
+            $fileId = $document['file_id'] ?? null;
             $fileType = 'document';
-            $caption = $message['caption'] ?? '';
+            $fileName = $document['file_name'] ?? 'document';
         } elseif (isset($message['video'])) {
-            // Видео
             $video = $message['video'];
-            $fileId = $video['file_id'];
+            $fileId = $video['file_id'] ?? null;
             $fileType = 'video';
-            $caption = $message['caption'] ?? '';
+            $fileName = $video['file_name'] ?? 'video';
         } elseif (isset($message['audio'])) {
-            // Аудио
             $audio = $message['audio'];
-            $fileId = $audio['file_id'];
+            $fileId = $audio['file_id'] ?? null;
             $fileType = 'audio';
-            $caption = $message['caption'] ?? '';
+            $fileName = $audio['file_name'] ?? 'audio';
         } elseif (isset($message['voice'])) {
-            // Голосовое сообщение
             $voice = $message['voice'];
-            $fileId = $voice['file_id'];
+            $fileId = $voice['file_id'] ?? null;
             $fileType = 'voice';
+            $fileName = 'voice';
+            $caption = '';
+        } elseif (isset($message['sticker'])) {
+            $sticker = $message['sticker'];
+            $fileId = $sticker['file_id'] ?? null;
+            $fileType = 'sticker';
+            $fileName = 'sticker';
             $caption = '';
         } else {
             return false;
         }
-        
-        // Сохраняем файл
-        $savedPath = $this->saveTelegramFile($fileId, $fileName ?? null);
-        
-        if ($savedPath) {
-            $this->writeLog("File uploaded by $userName (ID: $userId) in chat $chatId: $savedPath", 'INFO');
-            
-            // Отправляем подтверждение пользователю
-            $response = "✅ Файл сохранен!\n";
-            $response .= "📁 Тип: $fileType\n";
-            $response .= "📝 Путь: " . basename($savedPath) . "\n";
-            $response .= "💾 Размер: " . $this->formatBytes(filesize($savedPath)) . "\n";
-            if (!empty($caption)) {
-                $response .= "📋 Подпись: $caption";
-            }
-            
-            $this->sendMessage($chatId, $response);
-            
-            return [
-                'path' => $savedPath,
-                'type' => $fileType,
-                'caption' => $caption,
-                'chat_id' => $chatId,
-                'user_id' => $userId
-            ];
+
+        if (empty($fileId)) {
+            $this->writeLog("Uploaded file without file_id from user $userName (ID: $userId)", 'ERROR');
+            return false;
         }
-        
-        return false;
+
+        $this->writeLog("File reference received from $userName (ID: $userId) in chat $chatId: $fileType/$fileId", 'INFO');
+
+        $response = "✅ Файл добавлен в черновик!\n";
+        $response .= "📁 Тип: $fileType\n";
+        $response .= "🆔 file_id: `$fileId`\n";
+        if (!empty($caption)) {
+            $response .= "📋 Подпись: $caption";
+        }
+
+        $this->sendMessage($chatId, $response, 'Markdown');
+
+        return [
+            'file_id' => $fileId,
+            'file_name' => $fileName,
+            'type' => $fileType,
+            'caption' => $caption,
+            'chat_id' => $chatId,
+            'user_id' => $userId
+        ];
     }
-    
+
     /**
      * Отправка фото из локального файла (с поддержкой topic_id)
      */
