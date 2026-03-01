@@ -58,6 +58,38 @@ function parseLogLineAdmin(string $line): array {
     ];
 }
 
+function readChatLogEntriesDataAdmin(string $chatId, int $limit = 200, int $offset = 0): array {
+    $safe = preg_replace('/[^0-9\-]/', '_', $chatId);
+    $path = rtrim(CHAT_LOG_DIR, '/') . '/chat_' . $safe . '.log';
+    if (!file_exists($path)) {
+        return ['items' => [], 'total' => 0, 'offset' => $offset, 'limit' => $limit];
+    }
+
+    $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($lines === false) {
+        return ['items' => [], 'total' => 0, 'offset' => $offset, 'limit' => $limit];
+    }
+
+    $rows = [];
+    foreach ($lines as $line) {
+        $decoded = json_decode($line, true);
+        if (is_array($decoded)) {
+            $rows[] = $decoded;
+        }
+    }
+
+    $rows = array_reverse($rows);
+    $total = count($rows);
+    $slice = array_slice($rows, $offset, $limit);
+
+    return [
+        'items' => $slice,
+        'total' => $total,
+        'offset' => $offset,
+        'limit' => $limit,
+    ];
+}
+
 function filterLogRows(array $rows, array $filters): array {
     return array_values(array_filter($rows, static function (array $row) use ($filters): bool {
         if (($filters['level'] ?? '') !== '' && strtoupper($row['level']) !== strtoupper($filters['level'])) {
@@ -142,7 +174,7 @@ switch ($action) {
                 + (file_exists(ERROR_LOG_FILE) ? filesize(ERROR_LOG_FILE) : 0),
             'latest_errors' => array_slice($errorRows, 0, 5),
             'hours' => [
-                'labels' => ['-5h', '-4h', '-3h', '-2h', '-1h', 'now'],
+                'labels' => ['-5ч', '-4ч', '-3ч', '-2ч', '-1ч', 'сейчас'],
                 'messages' => [0, 0, 0, 0, 0, calcActivityPerHour(array_map('parseLogLineAdmin', $allRaw))],
                 'errors' => [0, 0, 0, 0, 0, calcActivityPerHour($errorRows)],
             ],
@@ -171,20 +203,36 @@ switch ($action) {
             'limit' => $limit,
         ]);
 
+    case 'chat_logs':
+        $chatId = (string)($_GET['chat_id'] ?? '');
+        if ($chatId === '') {
+            jsonResponse(['error' => 'chat_id обязателен'], 400);
+        }
+        $limit = min(1000, max(20, (int)($_GET['limit'] ?? 200)));
+        $offset = max(0, (int)($_GET['offset'] ?? 0));
+        jsonResponse(readChatLogEntriesDataAdmin($chatId, $limit, $offset));
+
     case 'chats':
         $registry = loadChatRegistryDataAdmin();
-        jsonResponse(array_values($registry['chats']));
+        $result = [];
+        foreach ($registry['chats'] as $id => $chat) {
+            if (is_array($chat)) {
+                $chat['chat_id'] = (string)$id;
+                $result[] = $chat;
+            }
+        }
+        jsonResponse($result);
 
     case 'files':
         jsonResponse($bot->getLocalFiles());
 
     case 'clear':
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            jsonResponse(['error' => 'Method not allowed'], 405);
+            jsonResponse(['error' => 'Метод не поддерживается'], 405);
         }
         $type = $_POST['type'] ?? 'all';
         if (!clearBotLogsAdmin((string)$type)) {
-            jsonResponse(['error' => 'Unknown log type'], 400);
+            jsonResponse(['error' => 'Неизвестный тип логов'], 400);
         }
         jsonResponse(['status' => 'ok']);
 
@@ -197,5 +245,5 @@ switch ($action) {
         exit;
 
     default:
-        jsonResponse(['error' => 'Unknown action'], 400);
+        jsonResponse(['error' => 'Неизвестное действие'], 400);
 }

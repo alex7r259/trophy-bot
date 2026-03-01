@@ -1,13 +1,13 @@
 <?php
 function renderAdminLayout(string $activeSection = 'dashboard'): void {
     $sections = [
-        'dashboard' => 'Dashboard',
-        'incoming' => 'Logs / Incoming',
-        'error' => 'Logs / Errors',
-        'messages' => 'Logs / Messages',
-        'chats' => 'Chats',
-        'files' => 'Files',
-        'settings' => 'Settings',
+        'dashboard' => 'Дашборд',
+        'incoming' => 'Логи / Входящие',
+        'error' => 'Логи / Ошибки',
+        'messages' => 'Логи чатов',
+        'chats' => 'Чаты',
+        'files' => 'Файлы',
+        'settings' => 'Настройки',
     ];
     ?>
     <!doctype html>
@@ -29,7 +29,7 @@ function renderAdminLayout(string $activeSection = 'dashboard'): void {
             <?php endforeach; ?>
         </nav>
         <div class="sidebar-footer">
-            <button class="button-danger" id="logout-btn" type="button">Logout</button>
+            <button class="button-danger" id="logout-btn" type="button">Выйти</button>
         </div>
     </aside>
     <main class="main">
