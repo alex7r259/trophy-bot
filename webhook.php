@@ -49,19 +49,11 @@ if (!empty($update) && isset($update['message'])) {
 
                 $bot->sendMessage(
                     $fileInfo['chat_id'],
-                    "✅ Файл добавлен в черновик.",
+                    "✅ Файл добавлен в черновик.\n\n" . buildComposeStatusMessage($state[$composeUserId]),
                     'Markdown',
                     null,
                     null,
-                    closeReplyKeyboard()
-                );
-                $bot->sendMessage(
-                    $fileInfo['chat_id'],
-                    "Выберите чат для отправки:",
-                    'Markdown',
-                    null,
-                    null,
-                    buildChatSelectionKeyboard($composeUserId)
+                    buildComposeKeyboard($state[$composeUserId])
                 );
             }
         }
