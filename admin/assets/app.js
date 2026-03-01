@@ -152,8 +152,8 @@ function renderChatMessage(entry) {
   const wrapper = document.createElement('div');
   wrapper.className = `chat-message ${entry.direction || 'incoming'}`;
 
-  const time = entry.created_at
-    ? new Date(entry.created_at).toLocaleTimeString()
+  const time = entry.timestamp
+    ? new Date(entry.timestamp).toLocaleString('ru-RU')
     : '';
 
   const meta = document.createElement('div');
