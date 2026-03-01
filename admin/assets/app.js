@@ -147,6 +147,37 @@ async function renderLogs(sectionType) {
   await loadLogs();
 }
 
+
+function renderChatMessage(entry) {
+  const wrapper = document.createElement('div');
+  wrapper.className = `chat-message ${entry.direction || 'incoming'}`;
+
+  const time = entry.created_at
+    ? new Date(entry.created_at).toLocaleTimeString()
+    : '';
+
+  const meta = document.createElement('div');
+  meta.className = 'chat-meta';
+  meta.innerHTML = `
+    <span class="chat-user">${entry.username || entry.role || 'system'}</span>
+    <span class="chat-time">${time}</span>
+  `;
+
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-bubble';
+
+  if (typeof entry.message === 'object' && entry.message !== null) {
+    bubble.innerHTML = `<pre class="json-block">${JSON.stringify(entry.message, null, 2)}</pre>`;
+  } else {
+    bubble.textContent = entry.message || entry.text || '';
+  }
+
+  wrapper.appendChild(meta);
+  wrapper.appendChild(bubble);
+
+  return wrapper;
+}
+
 async function renderChatLogs() {
   const chats = await api('chats');
   if (!selectedChatId && chats.length > 0) {
@@ -180,17 +211,34 @@ async function renderChatLogs() {
       },
     });
 
-    container.innerHTML = '';
-    (data.items || []).forEach((entry) => {
-      const div = document.createElement('div');
-      div.className = 'log-entry';
-      div.textContent = JSON.stringify(entry, null, 2);
-      container.appendChild(div);
-    });
-
     if (!data.items || data.items.length === 0) {
       container.innerHTML = '<div class="muted">Записей нет</div>';
+      return;
     }
+
+    container.innerHTML = '<div class="chat-log"></div>';
+    const logWrapper = container.querySelector('.chat-log');
+
+    let lastDate = '';
+    (data.items || []).forEach((entry) => {
+      const date = entry.created_at
+        ? new Date(entry.created_at).toLocaleDateString()
+        : '';
+
+      if (date && date !== lastDate) {
+        lastDate = date;
+
+        const separator = document.createElement('div');
+        separator.className = 'chat-date-separator';
+        separator.textContent = date;
+
+        logWrapper.appendChild(separator);
+      }
+
+      logWrapper.appendChild(renderChatMessage(entry));
+    });
+
+    logWrapper.scrollTop = logWrapper.scrollHeight;
   }
 
   document.getElementById('chat-select').addEventListener('change', (e) => {
