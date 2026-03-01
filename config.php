@@ -44,4 +44,5 @@ date_default_timezone_set(TIMEZONE);
 
 // Включение отладки
 define('DEBUG_MODE', true);
+define('LOG_VIEW_PASSWORD', '123456789');
 ?>
