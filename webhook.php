@@ -49,11 +49,19 @@ if (!empty($update) && isset($update['message'])) {
 
                 $bot->sendMessage(
                     $fileInfo['chat_id'],
-                    "✅ Файл добавлен в черновик.\n\n" . buildComposeStatusMessage($state[$composeUserId]),
+                    "✅ Файл добавлен в черновик.",
                     'Markdown',
                     null,
                     null,
-                    buildComposeKeyboard($state[$composeUserId])
+                    closeReplyKeyboard()
+                );
+                $bot->sendMessage(
+                    $fileInfo['chat_id'],
+                    "Выберите чат для отправки:",
+                    'Markdown',
+                    null,
+                    null,
+                    buildChatSelectionKeyboard($composeUserId)
                 );
             }
         }
@@ -68,7 +76,7 @@ if (!empty($update) && isset($update['message'])) {
         exit;
     }
 
-    $knownCommands = ['/start', '/help', '/compose', '/cancel_compose'];
+    $knownCommands = ['/start'];
     $command = '';
     foreach ($knownCommands as $cmd) {
         if (strpos($text, $cmd) === 0) {
@@ -137,9 +145,10 @@ if (!empty($update) && isset($update['message'])) {
             }
 
             if ($text === '❌ Отмена') {
-                unset($state[$userId]);
+                $state[$userId] = freshComposeDraft();
                 saveComposeState($state);
-                $bot->sendMessage($chatId, "❌ Режим отправки отменен.");
+                $bot->sendMessage($chatId, "❌ Черновик сброшен.", 'Markdown', null, null, closeReplyKeyboard());
+                $bot->sendMessage($chatId, "Выберите чат для отправки:", 'Markdown', null, null, buildChatSelectionKeyboard($userId));
                 http_response_code(200);
                 echo 'OK';
                 exit;
@@ -148,8 +157,9 @@ if (!empty($update) && isset($update['message'])) {
             if ($text === '🚀 Отправить') {
                 $sendResult = sendComposeDraft($bot, $state[$userId]);
                 if ($sendResult['ok']) {
-                    $bot->sendMessage($chatId, "✅ Черновик отправлен.");
-                    unset($state[$userId]);
+                    $state[$userId] = freshComposeDraft();
+                    $bot->sendMessage($chatId, "✅ Черновик отправлен.", 'Markdown', null, null, closeReplyKeyboard());
+                    $bot->sendMessage($chatId, "Выберите чат для отправки:", 'Markdown', null, null, buildChatSelectionKeyboard($userId));
                 } else {
                     $bot->sendMessage($chatId, "❌ " . $sendResult['error'] . "\n\n" . buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard($state[$userId]));
                 }
@@ -187,43 +197,11 @@ if (!empty($update) && isset($update['message'])) {
 
     switch ($command) {
         case '/start':
-        case '/help':
-            $bot->sendMessage($chatId, getHelpText(), 'Markdown');
-            break;
-
-        case '/compose':
-            $parts = preg_split('/\s+/', $text);
             $state = loadComposeState();
-            $state[$userId] = [
-                'chat_id' => null,
-                'topic_id' => null,
-                'text' => '',
-                'caption' => '',
-                'file_id' => '',
-                'file_name' => '',
-                'file_type' => '',
-                'waiting_for' => null
-            ];
-
-            if (isset($parts[1]) && $parts[1] !== '') {
-                $state[$userId]['chat_id'] = $parts[1];
-                registerManualChatSelection($parts[1], null, null, null);
-            }
-            if (isset($parts[2]) && is_numeric($parts[2])) {
-                $state[$userId]['topic_id'] = (int)$parts[2];
-                registerManualChatSelection($state[$userId]['chat_id'], (int)$parts[2], null, null);
-            }
-
+            $state[$userId] = freshComposeDraft();
             saveComposeState($state);
-            $bot->sendMessage($chatId, buildComposeStatusMessage($state[$userId]), 'Markdown', null, null, buildComposeKeyboard($state[$userId]));
+            $bot->sendMessage($chatId, getHelpText(), 'Markdown', null, null, closeReplyKeyboard());
             $bot->sendMessage($chatId, "Выберите чат для отправки:", 'Markdown', null, null, buildChatSelectionKeyboard($userId));
-            break;
-
-        case '/cancel_compose':
-            $state = loadComposeState();
-            unset($state[$userId]);
-            saveComposeState($state);
-            $bot->sendMessage($chatId, "❌ Режим отправки отменен.");
             break;
     }
 } elseif (!empty($update)) {
@@ -248,6 +226,24 @@ function loadComposeState() {
 
 function saveComposeState($state) {
     file_put_contents(COMPOSE_STATE_FILE, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+}
+
+
+function freshComposeDraft() {
+    return [
+        'chat_id' => null,
+        'topic_id' => null,
+        'text' => '',
+        'caption' => '',
+        'file_id' => '',
+        'file_name' => '',
+        'file_type' => '',
+        'waiting_for' => null
+    ];
+}
+
+function closeReplyKeyboard() {
+    return ['remove_keyboard' => true];
 }
 
 function buildComposeKeyboard($draft = null) {
@@ -484,16 +480,7 @@ function handleComposeCallback($bot, $callbackQuery) {
 
     $state = loadComposeState();
     if (!isset($state[$fromId])) {
-        $state[$fromId] = [
-            'chat_id' => null,
-            'topic_id' => null,
-            'text' => '',
-            'caption' => '',
-            'file_id' => '',
-            'file_name' => '',
-            'file_type' => '',
-            'waiting_for' => null
-        ];
+        $state[$fromId] = freshComposeDraft();
     }
 
     if (strpos($data, 'compose_chat:') === 0) {
@@ -563,9 +550,8 @@ function detectIncomingType($message) {
 
 function getHelpText() {
     $help = "📚 *Команды бота*\n\n";
-    $help .= "`/compose` — открыть режим подготовки сообщения\n";
-    $help .= "`/cancel_compose` — отменить текущий черновик\n\n";
-    $help .= "В compose выбирайте чат/топик кнопками, затем добавляйте текст, файл и подпись.\n";
+    $help .= "`/start` — открыть режим подготовки сообщения\n\n";
+    $help .= "Выбирайте чат/топик кнопками, затем добавляйте текст, файл и подпись.\n";
     $help .= "Логи сообщений доступны на сервере: `message_logs.php`.";
     return $help;
 }
